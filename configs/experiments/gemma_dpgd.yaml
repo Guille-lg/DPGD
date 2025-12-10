@@ -1,0 +1,38 @@
+# Experiment Configuration: DPGD with Gemma-7B
+# Main experiment with DPGD enabled
+
+experiment:
+  name: "gemma_dpgd"
+  seed: 42
+  output_dir: "./results/gemma_dpgd"
+  max_new_tokens: 100
+  num_beams: 1
+  do_sample: true
+  temperature: 0.7
+
+model:
+  name: "Gemma-7B"
+  path: "google/gemma-7b"
+  torch_dtype: "bfloat16"
+  device: "cuda"
+
+profile:
+  # Hybrid difficulty score weights (β coefficients)
+  beta_Freq: 0.4      # Weight for frequency component
+  beta_Morph: 0.4     # Weight for morphology component
+  beta_Mask: 0.2      # Weight for known/unknown component
+  threshold: 0.5      # Difficulty threshold for V_difficult
+  
+  # Frequency data
+  frequency_file: "data/frequency_es.csv"
+  long_word_threshold: 12
+  
+  # DPGD penalty weights (α coefficients)
+  alpha_SDP: 1.0      # Semantic Distance Penalty weight
+  alpha_Freq: 1.0     # Frequency penalty weight
+  alpha_Morph: 1.0    # Morphology penalty weight
+  delta_SDP: 0.5      # SDP threshold/margin. Must be > 0 for SDP to work. Paper: δ ∈ (0, 2]
+
+data:
+  path: "data/alexsis.jsonl"
+  test_split: 1.0     # Use all data for evaluation

@@ -1,0 +1,32 @@
+# Experiment Configuration
+# Placeholder configuration file for experiment settings
+
+experiment:
+  name: "baseline"
+  seed: 42
+  output_dir: "./results"
+  max_new_tokens: 100
+  num_beams: 1
+  do_sample: true
+  temperature: 0.7
+
+model:
+  name: "gpt2"
+  path: "gpt2"
+
+profile:
+  beta_Freq: 0.4
+  beta_Morph: 0.4
+  beta_Mask: 0.2
+  threshold: 0.5
+  frequency_file: "data/frequency_es.csv"
+  long_word_threshold: 12
+  alpha_SDP: 1.0
+  alpha_Freq: 1.0
+  alpha_Morph: 1.0
+  delta_SDP: 0.5  # Threshold/margin for SDP. Must be > 0 for SDP to work. Paper: δ ∈ (0, 2]
+
+data:
+  path: "data/alexsis.jsonl"
+  test_split: 1.0
+

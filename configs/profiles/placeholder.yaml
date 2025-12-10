@@ -1,0 +1,14 @@
+# Profile Configuration
+# Placeholder configuration file for profile settings
+
+profile:
+  name: "default"
+  complexity_threshold: 0.5
+  simplification_level: "medium"
+  
+decoding:
+  strategy: "greedy"
+  temperature: 1.0
+  top_k: 50
+  top_p: 0.95
+

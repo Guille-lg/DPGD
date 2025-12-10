@@ -1,0 +1,35 @@
+# Experiment Configuration: Ablation - No Morphology Penalty
+# DPGD without Morphology Penalty (only SDP + Freq)
+
+experiment:
+  name: "ablation_no_morph"
+  seed: 42
+  output_dir: "./results/ablation_no_morph"
+  max_new_tokens: 100
+  num_beams: 1
+  do_sample: true
+  temperature: 0.7
+
+model:
+  name: "Mistral-7B-v0.1"
+  path: "mistralai/Mistral-7B-v0.1"
+  torch_dtype: "bfloat16"
+  device: "cuda"
+
+profile:
+  beta_Freq: 0.4
+  beta_Morph: 0.4
+  beta_Mask: 0.2
+  threshold: 0.5
+  frequency_file: "data/frequency_es.csv"
+  long_word_threshold: 12
+  
+  # Ablation: Morphology penalty disabled
+  alpha_SDP: 1.0      # Enabled
+  alpha_Freq: 1.0     # Enabled
+  alpha_Morph: 0.0    # DISABLED
+  delta_SDP: 0.5      # Must be > 0 for SDP to work
+
+data:
+  path: "data/alexsis.jsonl"
+  test_split: 1.0

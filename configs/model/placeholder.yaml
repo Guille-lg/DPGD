@@ -1,0 +1,13 @@
+# Model Configuration
+# Placeholder configuration file for model settings
+
+model:
+  name: "bert-base-uncased"
+  max_length: 512
+  device: "cuda"
+  
+training:
+  batch_size: 16
+  learning_rate: 2e-5
+  num_epochs: 3
+
