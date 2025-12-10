@@ -114,12 +114,20 @@ class DPGDLogitsProcessor(LogitsProcessor):
         Pre-compute token mappings for all difficult words to avoid on-the-fly tokenization.
         
         Creates two caches:
-        1. _word_first_tokens: Maps difficult word -> first token ID (for empty prefix case)
-        2. _prefix_suffix_tokens: Maps (prefix, word) -> first token ID of suffix
+        1. _word_start_tokens: Maps first token of each difficult word to its penalties.
+           Used at word boundaries to prevent STARTING difficult words.
+        2. _prefix_to_tokens: Maps character prefixes to continuation tokens.
+           Used mid-word to prevent COMPLETING difficult words.
+        
+        This ensures deterministic penalties apply both when:
+        - Starting a new word that is difficult (word boundary case)
+        - Continuing a partial word toward a difficult completion
         """
-        # Cache: word -> (first_token_id, F_norm, M_w, is_unknown)
-        self._word_first_tokens: Dict[str, Tuple[int, float, float, bool]] = {}
-        # Cache: prefix -> {token_id: (word, F_norm, M_w, is_unknown)}
+        # Cache for word-START tokens: token_id -> (word, F_norm, M_w, is_unknown)
+        # These are the FIRST tokens of difficult words, used at word boundaries
+        self._word_start_tokens: Dict[int, Tuple[str, float, float, bool]] = {}
+        
+        # Cache for word-CONTINUATION: prefix -> {token_id: (word, F_norm, M_w, is_unknown)}
         self._prefix_to_tokens: Dict[str, Dict[int, Tuple[str, float, float, bool]]] = {}
         
         for word in self.profile.V_difficult:
@@ -128,25 +136,37 @@ class DPGDLogitsProcessor(LogitsProcessor):
             if not word_profile:
                 continue
             
-            # Tokenize the full word
-            encoding = self.tokenizer(
+            is_unknown = word_profile.K_w == 1
+            
+            # === Word-START case: tokenize full word, get first token ===
+            # This handles the word boundary case where we want to prevent
+            # STARTING a difficult word. Only actual word tokens will be here,
+            # never pure whitespace or punctuation.
+            full_encoding = self.tokenizer(
                 word_lower,
                 add_special_tokens=False,
                 return_tensors="pt",
             )
-            token_ids = encoding["input_ids"][0].tolist()
+            full_tokens = full_encoding["input_ids"][0].tolist()
             
-            if not token_ids:
-                continue
+            if full_tokens:
+                first_token_id = full_tokens[0]
+                
+                # Store with max penalties if multiple difficult words share first token
+                if first_token_id in self._word_start_tokens:
+                    _, existing_f, existing_m, existing_unknown = self._word_start_tokens[first_token_id]
+                    self._word_start_tokens[first_token_id] = (
+                        word_lower,
+                        max(existing_f, word_profile.F_norm),
+                        max(existing_m, word_profile.M_w),
+                        existing_unknown or is_unknown,
+                    )
+                else:
+                    self._word_start_tokens[first_token_id] = (
+                        word_lower, word_profile.F_norm, word_profile.M_w, is_unknown
+                    )
             
-            # Store first token for empty prefix case
-            first_token_id = token_ids[0]
-            is_unknown = word_profile.K_w == 1
-            self._word_first_tokens[word_lower] = (
-                first_token_id, word_profile.F_norm, word_profile.M_w, is_unknown
-            )
-            
-            # Pre-compute suffix tokenizations for all prefixes
+            # === Word-CONTINUATION case: tokenize suffixes for each prefix ===
             for prefix_len in range(1, len(word_lower)):
                 prefix = word_lower[:prefix_len]
                 suffix = word_lower[prefix_len:]
@@ -354,43 +374,43 @@ class DPGDLogitsProcessor(LogitsProcessor):
     def _get_completing_tokens(
         self,
         current_word_prefix: str,
+        at_word_boundary: bool = False,
     ) -> Dict[int, Tuple[str, float, float, bool]]:
         """
-        Find tokens that would complete a difficult word given the current prefix.
+        Find tokens that would complete or start a difficult word.
         
         Uses pre-computed token mappings for O(1) lookup instead of on-the-fly tokenization.
         
+        Per the paper's idealized φ^(k) definition (Section 3.3):
+        - A^(k)(t_i) contains difficult words w where Tok(w) has the current suffix
+          followed by t_i as a prefix.
+        - At word boundaries (empty suffix), this means t_i is a prefix of Tok(w),
+          i.e., t_i could be the FIRST token of a difficult word.
+        
+        This implementation handles both cases:
+        1. Word boundary (at_word_boundary=True): Return first tokens of difficult words
+        2. Mid-word (prefix provided): Return continuation tokens for that prefix
+        
         Args:
-            current_word_prefix: Current partial word being generated
+            current_word_prefix: Current partial word being generated (may be empty)
+            at_word_boundary: If True, we're at a word boundary and should return
+                              word-start tokens instead of continuation tokens
             
         Returns:
             Dict mapping token_id -> (completed_word, F_norm, M_w, is_unknown)
         """
-        completing_tokens: Dict[int, Tuple[str, float, float, bool]] = {}
+        if at_word_boundary or not current_word_prefix:
+            # At word boundary: return tokens that would START a difficult word.
+            # These are the first tokens of each difficult word.
+            # Only genuine word tokens are in this set (no whitespace/punctuation).
+            return self._word_start_tokens.copy()
         
-        if not current_word_prefix:
-            # No prefix yet - use pre-computed first token mappings
-            # Per paper: penalize the FIRST token of ANY difficult word (single or multi-token)
-            for word_lower, (first_token_id, f_norm, m_w, is_unknown) in self._word_first_tokens.items():
-                # If multiple words share this first token, use max penalties
-                if first_token_id in completing_tokens:
-                    _, existing_f, existing_m, existing_unknown = completing_tokens[first_token_id]
-                    completing_tokens[first_token_id] = (
-                        word_lower,
-                        max(existing_f, f_norm),
-                        max(existing_m, m_w),
-                        existing_unknown or is_unknown,
-                    )
-                else:
-                    completing_tokens[first_token_id] = (
-                        word_lower, f_norm, m_w, is_unknown
-                    )
-            return completing_tokens
-        
-        # Use pre-computed prefix->token mappings for O(1) lookup
+        # Mid-word: use pre-computed prefix->token mappings for O(1) lookup
         prefix_tokens = self._prefix_to_tokens.get(current_word_prefix, {})
         
-        # Merge with completing_tokens, using max penalties for conflicts
+        completing_tokens: Dict[int, Tuple[str, float, float, bool]] = {}
+        
+        # Copy tokens, using max penalties for any conflicts
         for token_id, (word, f_norm, m_w, is_unknown) in prefix_tokens.items():
             if token_id in completing_tokens:
                 _, existing_f, existing_m, existing_unknown = completing_tokens[token_id]
@@ -414,13 +434,14 @@ class DPGDLogitsProcessor(LogitsProcessor):
         """
         Compute deterministic penalties (frequency, morphology, masking).
         
-        Unlike uniform penalties, this targets SPECIFIC tokens that would
-        complete a difficult word.
+        Targets SPECIFIC tokens that would either:
+        1. START a difficult word (at word boundaries)
+        2. COMPLETE a difficult word (when a prefix is being formed)
         
         Args:
             vocab_size: Size of vocabulary
             current_word_prefix: Current partial word being generated
-            is_complete_word: Whether the word is complete
+            is_complete_word: Whether the current word is complete (at word boundary)
             
         Returns:
             Tuple of (frequency_penalties, morphology_penalties, mask_tokens)
@@ -430,13 +451,13 @@ class DPGDLogitsProcessor(LogitsProcessor):
         morph_penalties = torch.zeros(vocab_size, device=self.device)
         mask_tokens = torch.zeros(vocab_size, dtype=torch.bool, device=self.device)
         
-        if is_complete_word:
-            # Word is complete, no prefix-based penalties needed
-            # SDP will still apply to all tokens
-            return freq_penalties, morph_penalties, mask_tokens
-        
-        # Find tokens that would complete a difficult word
-        completing_tokens = self._get_completing_tokens(current_word_prefix)
+        # Determine which tokens to penalize based on context:
+        # - At word boundary (is_complete_word=True): penalize word-START tokens
+        # - Mid-word (is_complete_word=False): penalize word-CONTINUATION tokens
+        completing_tokens = self._get_completing_tokens(
+            current_word_prefix,
+            at_word_boundary=is_complete_word,
+        )
         
         for token_id, (word, F_norm, M_w, is_unknown) in completing_tokens.items():
             if token_id < vocab_size:
